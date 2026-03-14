@@ -25,9 +25,17 @@ def generate_book_index(book_name: str) -> str:
     for filename in sorted(directory.glob("*.md")):
         if filename.name != "index.md":
             # Parse filename to extract chapter info
-            # Format: chapter_1_a1b2c3d4.md or chapter_1_title_a1b2c3d4.md
+            # Format: chapter_6_nugget_1_*.md
             parts = filename.stem.split("_")
-            if len(parts) >= 2:
+            if len(parts) >= 2 and parts[1] == "nugget":
+                # New format: chapter_X_nugget_Y_*
+                if len(parts) >= 3:
+                    chapter_num = parts[0].replace("chapter", "").strip()
+                    chapter = f"Chapter {chapter_num}"
+                else:
+                    chapter = filename.stem.replace("_", " ").title()
+            elif len(parts) >= 2:
+                # Old format: chapter_X_*
                 chapter = " ".join(parts[0:2]).replace("_", " ").title()
             else:
                 chapter = filename.stem.replace("_", " ").title()

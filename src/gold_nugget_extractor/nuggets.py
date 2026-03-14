@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 
 
-def save_gold_nugget(book_name: str, chapter_ref: str, content: str, max_retries: int = 3) -> str:
+def save_gold_nugget(book_name: str, chapter_ref: str, content: str, nugget_index: int = 1, max_retries: int = 3) -> str:
     """
     Saves an extracted nugget to the structured output folder with deduplication and retry logic.
     
@@ -14,6 +14,7 @@ def save_gold_nugget(book_name: str, chapter_ref: str, content: str, max_retries
         book_name: The title of the book (used for folder name).
         chapter_ref: The chapter identifier (e.g., 'Chapter 1').
         content: The formatted Markdown content of the nugget.
+        nugget_index: The index of this nugget within the chapter (for ordering).
         max_retries: Maximum number of retry attempts for file operations.
     
     Returns:
@@ -27,7 +28,8 @@ def save_gold_nugget(book_name: str, chapter_ref: str, content: str, max_retries
     
     content_hash = hashlib.md5(content.encode()).hexdigest()[:8]
     unique_id = uuid.uuid4().hex[:8]
-    filename = f"{chapter_ref.lower().replace(' ', '_')}_{unique_id}_{content_hash}.md"
+    # Include nugget index in filename for clarity
+    filename = f"{chapter_ref.lower().replace(' ', '_')}_nugget_{nugget_index}_{unique_id}_{content_hash}.md"
     
     full_path = directory / filename
     

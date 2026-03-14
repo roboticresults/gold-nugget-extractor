@@ -38,7 +38,7 @@ Role: You are a Knowledge Curator. Your goal is to find "Gold Nuggets" (deep ins
 
 Parameters:
 - min_nuggets: Minimum number of nuggets to extract (default: 1)
-- max_nuggets: Maximum number of nuggets to extract (default: 3)
+- max_nuggets: Maximum number of nuggets to extract (default: 15)
 
 For every insight found, output exactly in this format:
 
@@ -112,7 +112,7 @@ class VectorDBClient:
         # with the keywords as the query
         return self.semantic_search(keywords, top_k)
     
-    def get_document_info(self, document_id: str = None, filename: str = None) -> dict:
+    def get_document_info(self, document_id: str = None, filename: str = None, limit: int = 100) -> dict:
         """Get information about a document."""
         try:
             where = {}
@@ -121,7 +121,7 @@ class VectorDBClient:
             elif filename:
                 where['source'] = filename
             
-            result = self.collection.get(where=where, limit=10)
+            result = self.collection.get(where=where, limit=limit)
             
             if result['ids']:
                 documents = []
@@ -129,7 +129,8 @@ class VectorDBClient:
                     documents.append({
                         'id': doc_id,
                         'source': result['metadatas'][i].get('source', 'unknown') if result['metadatas'] else 'unknown',
-                        'content': result['documents'][i] if result['documents'] else None
+                        'content': result['documents'][i] if result['documents'] else None,
+                        'metadata': result['metadatas'][i] if result['metadatas'] else None
                     })
                 return {'documents': documents}
             else:
@@ -195,10 +196,20 @@ class GoldNuggetExtractor:
         doc_info = self.db_client.get_document_info(filename=self.book_name)
         
         if "error" in doc_info:
-            # Try semantic search as fallback
-            search_result = self.db_client.semantic_search(f"table of contents {self.book_name}")
-            if "results" in search_result:
-                return [f"Chapter {i+1}" for i in range(min(len(search_result["results"]), 10))]
+            # Try semantic search as fallback - search for chapter-related content
+            search_result = self.db_client.semantic_search(f"chapter one start {self.book_name}", top_k=10)
+            if "results" in search_result and search_result["results"]:
+                # Extract unique chapter numbers from results
+                chapters = []
+                seen_chapters = set()
+                for i, result in enumerate(search_result["results"][:10]):
+                    # Try to extract chapter number from metadata or content
+                    chapter_num = i + 1
+                    chapter_ref = f"Chapter {chapter_num}"
+                    if chapter_ref not in seen_chapters:
+                        chapters.append(chapter_ref)
+                        seen_chapters.add(chapter_ref)
+                return chapters
             return ["Chapter 1", "Chapter 2", "Chapter 3"]
         
         # Get table of contents from document info
@@ -212,19 +223,58 @@ class GoldNuggetExtractor:
     
     def get_chapter_content(self, chapter_ref: str) -> str:
         """Get the content of a specific chapter using keyword search."""
-        # Search for the chapter in the book
-        search_result = self.db_client.keyword_search(f"{self.book_name} {chapter_ref}", top_k=3)
+        # Extract chapter number from chapter_ref (e.g., "Chapter 1" -> 1)
+        chapter_num = 0
+        for part in chapter_ref.split():
+            if part.isdigit():
+                chapter_num = int(part)
+                break
+        
+        # First, try to get document info with the book name
+        doc_info = self.db_client.get_document_info(filename=self.book_name, limit=100)
+        
+        if "documents" in doc_info:
+            # Filter documents by chapter number from metadata
+            chapter_docs = []
+            for doc in doc_info["documents"]:
+                metadata = doc.get("metadata", {})
+                if metadata:
+                    # Check if metadata has chapter info
+                    doc_chapter = metadata.get("chapter") or metadata.get("page")
+                    if doc_chapter == chapter_num:
+                        chapter_docs.append(doc)
+            
+            if chapter_docs:
+                # Combine content from matching chapters
+                content_parts = []
+                seen_texts = set()
+                for doc in chapter_docs:
+                    text = doc.get("content", "")
+                    if text and text not in seen_texts:
+                        content_parts.append(text)
+                        seen_texts.add(text)
+                
+                if content_parts:
+                    return "\n\n".join(content_parts)
+        
+        # Fallback: use semantic search with chapter filter
+        search_result = self.db_client.semantic_search(f"{self.book_name} {chapter_ref} content", top_k=5, document_filter=self.book_name)
         
         if "results" in search_result and search_result["results"]:
-            # Combine the top results
+            # Combine the top results, prioritizing unique content
             content_parts = []
-            for result in search_result["results"][:3]:
+            seen_texts = set()
+            for result in search_result["results"][:5]:
                 text = result.get("text", "")
-                if text:
+                if text and text not in seen_texts:
                     content_parts.append(text)
-            return "\n\n".join(content_parts)
+                    seen_texts.add(text)
+            
+            if content_parts:
+                return "\n\n".join(content_parts)
         
-        return f"Content for {chapter_ref}"
+        # Fallback: return a more descriptive placeholder
+        return f"Content for {chapter_ref} from {self.book_name}"
     
     def extract_nuggets(self, chapter_ref: str, chapter_content: str) -> list:
         """Extract gold nuggets from chapter content using the LLM."""
@@ -237,14 +287,14 @@ Chapter: {chapter_ref}
 Content:
 {chapter_content}
 
-Please extract 1-3 gold nuggets (key insights or core concepts) from this chapter.
-Format each nugget as:
-"[Quote/Concept]"
+Please extract 1-15 gold nuggets (key insights or core concepts) from this chapter.
+Format each nugget as a JSON object with these fields:
+- quote: The key insight or quote
+- reference: {self.book_name}, {chapter_ref}
+- explanation: [3-4 sentences explaining importance]
+- final_thoughts: [2-3 sentences]
 
-Reference: {self.book_name}, {chapter_ref}
-
-Explanation: [3-4 sentences explaining importance]
-Final thoughts: [2-3 sentences]
+Return the result as a JSON array of objects.
 """
         
         agent = create_gold_nugget_agent(self.model)
@@ -263,7 +313,42 @@ Final thoughts: [2-3 sentences]
                     elif isinstance(nuggets, dict):
                         return [nuggets]
                 except json.JSONDecodeError:
-                    # If not JSON, return as a single nugget
+                    # If not JSON, try to parse multiple nuggets from text
+                    # Look for patterns like "[Quote]" followed by "Reference:" and "Explanation:"
+                    import re
+                    nuggets = []
+                    
+                    # Split by the quote pattern (lines starting with [ or containing quotes)
+                    # Look for nugget patterns: "[Quote]" followed by Reference, Explanation, Final thoughts
+                    # Improved pattern to handle various formats
+                    # Pattern: "Quote" followed by Reference, Explanation, Final thoughts
+                    # Handle format: # "Quote" > "Quote" *Reference: ... ## Explanation Explanation: ... Final thoughts: ...
+                    pattern = r'#\s*"([^"]+)"\s*\n\s*>\s*"([^"]+)"\s*\n\s*\*Reference:\s*(.+?)\s*\n\s*##\s*Explanation\s*\n\s*Explanation:\s*(.+?)\s*\n\s*Final thoughts:\s*(.+?)(?=\n\s*---\s*\n\s*#|$)'
+                    
+                    matches = re.findall(pattern, response, re.DOTALL)
+                    
+                    # If no matches, try alternative pattern
+                    if not matches:
+                        alt_pattern = r'#\s*"([^"]+)"\s*\n\s*>\s*"([^"]+)"\s*\n\s*\*Reference:\s*(.+?)\s*\n\s*##\s*Explanation\s*\n\s*Explanation:\s*(.+?)\s*\n\s*Final thoughts:\s*(.+?)(?=\n\s*---\s*\n\s*#|$)'
+                        matches = re.findall(alt_pattern, response, re.DOTALL)
+                    
+                    # If still no matches, try simpler pattern
+                    if not matches:
+                        simple_pattern = r'#\s*"([^"]+)"\s*\n\s*>\s*"([^"]+)"\s*\n\s*\*Reference:\s*(.+?)\s*\n\s*##\s*Explanation\s*\n\s*Explanation:\s*(.+?)\s*\n\s*Final thoughts:\s*(.+?)(?=\n\s*---\s*\n\s*#|$)'
+                        matches = re.findall(simple_pattern, response, re.DOTALL)
+                    if matches:
+                        for match in matches:
+                            nuggets.append({
+                                "quote": match[0].strip(),
+                                "reference": match[1].strip(),
+                                "explanation": match[2].strip(),
+                                "final_thoughts": match[3].strip()
+                            })
+                    
+                    if nuggets:
+                        return nuggets
+                    
+                    # If no pattern matches, return as a single nugget
                     return [{
                         "quote": response[:100],
                         "reference": f"{self.book_name}, {chapter_ref}",
@@ -299,9 +384,9 @@ Final thoughts: [2-3 sentences]
         nuggets = self.extract_nuggets(chapter_ref, chapter_content)
         
         # Save each nugget
-        for nugget in nuggets:
+        for i, nugget in enumerate(nuggets, start=1):
             content = self.format_nugget(nugget, chapter_ref)
-            result = save_gold_nugget(self.book_name, chapter_ref, content)
+            result = save_gold_nugget(self.book_name, chapter_ref, content, nugget_index=i)
             print(f"  {result}")
         
         # Update state
